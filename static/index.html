@@ -7,6 +7,64 @@
 
     <meta name="viewport" content="width=device-width, initial-scale=1">
 
+    <script type="module">
+        import * as THREE from "https://cdn.skypack.dev/three@0.128.0";
+
+        let renderer, camera, scene;
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+        function init() {
+            renderer = new THREE.WebGLRenderer();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+
+            camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 1, 500);
+            camera.position.set(0, 0, 100);
+            camera.lookAt(0, 0, 0);
+
+            scene = new THREE.Scene();
+        }
+        function animate() {
+            requestAnimationFrame(animate);
+
+            renderer.render(scene, camera);
+        }
+        function createLine(points, color, opacity) {
+            let material = new THREE.LineBasicMaterial({ color: color, opacity: opacity });
+
+            let pointsArray = [];
+            points.forEach(p => pointsArray.push(p));
+
+            let geometry = new THREE.BufferGeometry().setFromPoints(pointsArray);
+
+            return new THREE.Line(geometry, material)
+        }
+
+        window.addEventListener("resize", onWindowResize, false);
+
+        init();
+
+        let firstLine = createLine(
+            [
+                new THREE.Vector3(-10, 0, 0),
+                new THREE.Vector3(0, 10, 0),
+                new THREE.Vector3(10, 0, 0)
+            ],
+            "salmon",
+            0.5
+        );
+
+        scene.add(firstLine);
+
+        document.getElementById("main-body").appendChild(renderer.domElement);
+
+        animate();
+    </script>
+
     <!-- Material design lite -->
     <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
     <link rel="stylesheet" href="https://code.getmdl.io/1.3.0/material.indigo-pink.min.css">
@@ -14,6 +72,10 @@
 
     <!-- mdl style -->
     <style>
+        #main-body {
+            background-color: black;
+        }
+
         .mdl-layout__header-row {
             background-color: black;
         }
@@ -41,7 +103,7 @@
         }
 
         .mdl-layout__content {
-            background-color: black;
+            background-color: transparent;
         }
 
         h1,
@@ -73,7 +135,7 @@
     </style>
 </head>
 
-<body>
+<body id="main-body">
     <div class="mdl-layout mdl-js-layout mdl-layout--fixed-header">
         <header class="mdl-layout__header">
             <div class="mdl-layout__header-row">
@@ -96,11 +158,11 @@
                 <a class="mdl-navigation__link" href="../readme">Website readme</a>
             </nav>
         </div>
-        <main class="mdl-layout__content">
+        <main class="mdl-layout__content" id="main">
             <div class="page-content mdl-grid">
                 <div class="mdl-cell mdl-cell--2-col mdl-cell--hide-tablet mdl-cell--hide-phone"></div>
                 <div class="mdl-cell mdl-cell--8-col">
-                    <div class="mdl-color-text--grey-500">/ Home</div>
+                    <div class="mdl-color-text--grey-500">/Home</div>
 
                     <h2>Resume</h2>
 
