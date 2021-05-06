@@ -10,15 +10,28 @@
     <script type="module">
         import * as THREE from "https://cdn.skypack.dev/three@0.128.0";
 
-        let renderer, camera, scene;
+        let renderer, camera, scene, mousePosition;
 
+        let primitives = [];
+
+        // Window callbacks
         function onWindowResize() {
             camera.aspect = window.innerWidth / window.innerHeight;
             camera.updateProjectionMatrix();
 
             renderer.setSize(window.innerWidth, window.innerHeight);
         }
+        function onMouseMove() {
+            mousePosition.x = (event.clientX / window.innerWidth) * 2 - 1;
+            mousePosition.y = -(event.clientY / window.innerHeight) * 2 + 1;
+            mousePosition.z = 1;
+        }
+
+        // 3js-specific handlers
         function init() {
+            window.addEventListener("resize", onWindowResize, false);
+            document.addEventListener("mousemove", onMouseMove, false)
+
             renderer = new THREE.WebGLRenderer();
             renderer.setSize(window.innerWidth, window.innerHeight);
 
@@ -27,13 +40,21 @@
             camera.lookAt(0, 0, 0);
 
             scene = new THREE.Scene();
+
+            mousePosition = new THREE.Vector3()
         }
         function animate() {
             requestAnimationFrame(animate);
 
+            primitives.forEach(p => {
+                p.lookAt(mousePosition);
+            });
+
             renderer.render(scene, camera);
         }
-        function createLine(points, color, opacity) {
+
+        // Primitive creation
+        function createLine(points, color, opacity, primitivesArray, threeScene) {
             let material = new THREE.LineBasicMaterial({ color: color, opacity: opacity });
 
             let pointsArray = [];
@@ -41,24 +62,40 @@
 
             let geometry = new THREE.BufferGeometry().setFromPoints(pointsArray);
 
-            return new THREE.Line(geometry, material)
-        }
+            let line = new THREE.Line(geometry, material);
 
-        window.addEventListener("resize", onWindowResize, false);
+            primitivesArray.push(line);
+
+            threeScene.add(line);
+        }
+        function createBox(x, y, z, color, opacity, primitivesArray, threeScene) {
+            let material = new THREE.MeshBasicMaterial({ color: color, opacity: opacity, wireframe: true });
+
+            let geometry = new THREE.BoxGeometry(x, y, z);
+
+            let box = new THREE.Mesh(geometry, material);
+
+            primitivesArray.push(box);
+
+            threeScene.add(box);
+        }
 
         init();
 
-        let firstLine = createLine(
+        createLine(
             [
                 new THREE.Vector3(-10, 0, 0),
                 new THREE.Vector3(0, 10, 0),
                 new THREE.Vector3(10, 0, 0)
             ],
             "salmon",
-            0.5
+            0.5,
+            primitives,
+            scene
         );
+        createBox(30, 30, 30, "salmon", 0.5, primitives, scene);
 
-        scene.add(firstLine);
+        // scene.add(firstLine);
 
         document.getElementById("main-body").appendChild(renderer.domElement);
 
