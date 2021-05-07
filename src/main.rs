@@ -14,5 +14,5 @@ async fn main() {
 
     let routes = warp::get().and(hello.or(readme).or(index));
 
-    warp::serve(routes).run(([127, 0, 0, 1], 3030)).await;
+    warp::serve(routes).run(([127, 0, 0, 1], 22022)).await;
 }

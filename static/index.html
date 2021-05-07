@@ -10,9 +10,553 @@
     <script type="module">
         import * as THREE from "https://cdn.skypack.dev/three@0.128.0";
 
-        let renderer, camera, scene, mousePosition;
+        // NOTE: pulled straight from the three.js repo May 7, 2021 @ 14:09
+        class OutlineEffect {
+
+            // The MIT License
+
+            // Copyright © 2010-2021 three.js authors
+
+            // Permission is hereby granted, free of charge, to any person obtaining a copy
+            // of this software and associated documentation files (the "Software"), to deal
+            // in the Software without restriction, including without limitation the rights
+            // to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+            // copies of the Software, and to permit persons to whom the Software is
+            // furnished to do so, subject to the following conditions:
+
+            // The above copyright notice and this permission notice shall be included in
+            // all copies or substantial portions of the Software.
+
+            // THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+            // IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+            // FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+            // AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+            // LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+            // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
+            // THE SOFTWARE.
+
+            constructor(renderer, parameters = {}) {
+
+                this.enabled = true;
+
+                const defaultThickness = parameters.defaultThickness !== undefined ? parameters.defaultThickness : 0.003;
+                const defaultColor = new THREE.Color().fromArray(parameters.defaultColor !== undefined ? parameters.defaultColor : [0, 0, 0]);
+                const defaultAlpha = parameters.defaultAlpha !== undefined ? parameters.defaultAlpha : 1.0;
+                const defaultKeepAlive = parameters.defaultKeepAlive !== undefined ? parameters.defaultKeepAlive : false;
+
+                // object.material.uuid -> outlineMaterial or
+                // object.material[ n ].uuid -> outlineMaterial
+                // save at the outline material creation and release
+                // if it's unused removeThresholdCount frames
+                // unless keepAlive is true.
+                const cache = {};
+
+                const removeThresholdCount = 60;
+
+                // outlineMaterial.uuid -> object.material or
+                // outlineMaterial.uuid -> object.material[ n ]
+                // save before render and release after render.
+                const originalMaterials = {};
+
+                // object.uuid -> originalOnBeforeRender
+                // save before render and release after render.
+                const originalOnBeforeRenders = {};
+
+                //this.cache = cache;  // for debug
+
+                const uniformsOutline = {
+                    outlineThickness: { value: defaultThickness },
+                    outlineColor: { value: defaultColor },
+                    outlineAlpha: { value: defaultAlpha }
+                };
+
+                const vertexShader = [
+                    '#include <common>',
+                    '#include <uv_pars_vertex>',
+                    '#include <displacementmap_pars_vertex>',
+                    '#include <fog_pars_vertex>',
+                    '#include <morphtarget_pars_vertex>',
+                    '#include <skinning_pars_vertex>',
+                    '#include <logdepthbuf_pars_vertex>',
+                    '#include <clipping_planes_pars_vertex>',
+
+                    'uniform float outlineThickness;',
+
+                    'vec4 calculateOutline( vec4 pos, vec3 normal, vec4 skinned ) {',
+                    '	float thickness = outlineThickness;',
+                    '	const float ratio = 1.0;', // TODO: support outline thickness ratio for each vertex
+                    '	vec4 pos2 = projectionMatrix * modelViewMatrix * vec4( skinned.xyz + normal, 1.0 );',
+                    // NOTE: subtract pos2 from pos because BackSide objectNormal is negative
+                    '	vec4 norm = normalize( pos - pos2 );',
+                    '	return pos + norm * thickness * pos.w * ratio;',
+                    '}',
+
+                    'void main() {',
+
+                    '	#include <uv_vertex>',
+
+                    '	#include <beginnormal_vertex>',
+                    '	#include <morphnormal_vertex>',
+                    '	#include <skinbase_vertex>',
+                    '	#include <skinnormal_vertex>',
+
+                    '	#include <begin_vertex>',
+                    '	#include <morphtarget_vertex>',
+                    '	#include <skinning_vertex>',
+                    '	#include <displacementmap_vertex>',
+                    '	#include <project_vertex>',
+
+                    '	vec3 outlineNormal = - objectNormal;', // the outline material is always rendered with BackSide
+
+                    '	gl_Position = calculateOutline( gl_Position, outlineNormal, vec4( transformed, 1.0 ) );',
+
+                    '	#include <logdepthbuf_vertex>',
+                    '	#include <clipping_planes_vertex>',
+                    '	#include <fog_vertex>',
+
+                    '}',
+
+                ].join('\n');
+
+                const fragmentShader = [
+
+                    '#include <common>',
+                    '#include <fog_pars_fragment>',
+                    '#include <logdepthbuf_pars_fragment>',
+                    '#include <clipping_planes_pars_fragment>',
+
+                    'uniform vec3 outlineColor;',
+                    'uniform float outlineAlpha;',
+
+                    'void main() {',
+
+                    '	#include <clipping_planes_fragment>',
+                    '	#include <logdepthbuf_fragment>',
+
+                    '	gl_FragColor = vec4( outlineColor, outlineAlpha );',
+
+                    '	#include <tonemapping_fragment>',
+                    '	#include <encodings_fragment>',
+                    '	#include <fog_fragment>',
+                    '	#include <premultiplied_alpha_fragment>',
+
+                    '}'
+
+                ].join('\n');
+
+                function createMaterial() {
+
+                    return new THREE.ShaderMaterial({
+                        type: 'OutlineEffect',
+                        uniforms: THREE.UniformsUtils.merge([
+                            THREE.UniformsLib['fog'],
+                            THREE.UniformsLib['displacementmap'],
+                            uniformsOutline
+                        ]),
+                        vertexShader: vertexShader,
+                        fragmentShader: fragmentShader,
+                        side: THREE.BackSide
+                    });
+
+                }
+
+                function getOutlineMaterialFromCache(originalMaterial) {
+
+                    let data = cache[originalMaterial.uuid];
+
+                    if (data === undefined) {
+
+                        data = {
+                            material: createMaterial(),
+                            used: true,
+                            keepAlive: defaultKeepAlive,
+                            count: 0
+                        };
+
+                        cache[originalMaterial.uuid] = data;
+
+                    }
+
+                    data.used = true;
+
+                    return data.material;
+
+                }
+
+                function getOutlineMaterial(originalMaterial) {
+
+                    const outlineMaterial = getOutlineMaterialFromCache(originalMaterial);
+
+                    originalMaterials[outlineMaterial.uuid] = originalMaterial;
+
+                    updateOutlineMaterial(outlineMaterial, originalMaterial);
+
+                    return outlineMaterial;
+
+                }
+
+                function isCompatible(object) {
+
+                    const geometry = object.geometry;
+                    let hasNormals = false;
+
+                    if (object.geometry !== undefined) {
+
+                        if (geometry.isBufferGeometry) {
+
+                            hasNormals = geometry.attributes.normal !== undefined;
+
+                        } else {
+
+                            hasNormals = true; // the renderer always produces a normal attribute for Geometry
+
+                        }
+
+                    }
+
+                    return (object.isMesh === true && object.material !== undefined && hasNormals === true);
+
+                }
+
+                function setOutlineMaterial(object) {
+
+                    if (isCompatible(object) === false) return;
+
+                    if (Array.isArray(object.material)) {
+
+                        for (let i = 0, il = object.material.length; i < il; i++) {
+
+                            object.material[i] = getOutlineMaterial(object.material[i]);
+
+                        }
+
+                    } else {
+
+                        object.material = getOutlineMaterial(object.material);
+
+                    }
+
+                    originalOnBeforeRenders[object.uuid] = object.onBeforeRender;
+                    object.onBeforeRender = onBeforeRender;
+
+                }
+
+                function restoreOriginalMaterial(object) {
+
+                    if (isCompatible(object) === false) return;
+
+                    if (Array.isArray(object.material)) {
+
+                        for (let i = 0, il = object.material.length; i < il; i++) {
+
+                            object.material[i] = originalMaterials[object.material[i].uuid];
+
+                        }
+
+                    } else {
+
+                        object.material = originalMaterials[object.material.uuid];
+
+                    }
+
+                    object.onBeforeRender = originalOnBeforeRenders[object.uuid];
+
+                }
+
+                function onBeforeRender(renderer, scene, camera, geometry, material) {
+
+                    const originalMaterial = originalMaterials[material.uuid];
+
+                    // just in case
+                    if (originalMaterial === undefined) return;
+
+                    updateUniforms(material, originalMaterial);
+
+                }
+
+                function updateUniforms(material, originalMaterial) {
+
+                    const outlineParameters = originalMaterial.userData.outlineParameters;
+
+                    material.uniforms.outlineAlpha.value = originalMaterial.opacity;
+
+                    if (outlineParameters !== undefined) {
+
+                        if (outlineParameters.thickness !== undefined) material.uniforms.outlineThickness.value = outlineParameters.thickness;
+                        if (outlineParameters.color !== undefined) material.uniforms.outlineColor.value.fromArray(outlineParameters.color);
+                        if (outlineParameters.alpha !== undefined) material.uniforms.outlineAlpha.value = outlineParameters.alpha;
+
+                    }
+
+                    if (originalMaterial.displacementMap) {
+
+                        material.uniforms.displacementMap.value = originalMaterial.displacementMap;
+                        material.uniforms.displacementScale.value = originalMaterial.displacementScale;
+                        material.uniforms.displacementBias.value = originalMaterial.displacementBias;
+
+                    }
+
+                }
+
+                function updateOutlineMaterial(material, originalMaterial) {
+
+                    if (material.name === 'invisible') return;
+
+                    const outlineParameters = originalMaterial.userData.outlineParameters;
+
+                    material.skinning = originalMaterial.skinning;
+                    material.morphTargets = originalMaterial.morphTargets;
+                    material.morphNormals = originalMaterial.morphNormals;
+                    material.fog = originalMaterial.fog;
+                    material.toneMapped = originalMaterial.toneMapped;
+                    material.premultipliedAlpha = originalMaterial.premultipliedAlpha;
+                    material.displacementMap = originalMaterial.displacementMap;
+
+                    if (outlineParameters !== undefined) {
+
+                        if (originalMaterial.visible === false) {
+
+                            material.visible = false;
+
+                        } else {
+
+                            material.visible = (outlineParameters.visible !== undefined) ? outlineParameters.visible : true;
+
+                        }
+
+                        material.transparent = (outlineParameters.alpha !== undefined && outlineParameters.alpha < 1.0) ? true : originalMaterial.transparent;
+
+                        if (outlineParameters.keepAlive !== undefined) cache[originalMaterial.uuid].keepAlive = outlineParameters.keepAlive;
+
+                    } else {
+
+                        material.transparent = originalMaterial.transparent;
+                        material.visible = originalMaterial.visible;
+
+                    }
+
+                    if (originalMaterial.wireframe === true || originalMaterial.depthTest === false) material.visible = false;
+
+                    if (originalMaterial.clippingPlanes) {
+
+                        material.clipping = true;
+
+                        material.clippingPlanes = originalMaterial.clippingPlanes;
+                        material.clipIntersection = originalMaterial.clipIntersection;
+                        material.clipShadows = originalMaterial.clipShadows;
+
+                    }
+
+                    material.version = originalMaterial.version; // update outline material if necessary
+
+                }
+
+                function cleanupCache() {
+
+                    let keys;
+
+                    // clear originialMaterials
+                    keys = Object.keys(originalMaterials);
+
+                    for (let i = 0, il = keys.length; i < il; i++) {
+
+                        originalMaterials[keys[i]] = undefined;
+
+                    }
+
+                    // clear originalOnBeforeRenders
+                    keys = Object.keys(originalOnBeforeRenders);
+
+                    for (let i = 0, il = keys.length; i < il; i++) {
+
+                        originalOnBeforeRenders[keys[i]] = undefined;
+
+                    }
+
+                    // remove unused outlineMaterial from cache
+                    keys = Object.keys(cache);
+
+                    for (let i = 0, il = keys.length; i < il; i++) {
+
+                        const key = keys[i];
+
+                        if (cache[key].used === false) {
+
+                            cache[key].count++;
+
+                            if (cache[key].keepAlive === false && cache[key].count > removeThresholdCount) {
+
+                                delete cache[key];
+
+                            }
+
+                        } else {
+
+                            cache[key].used = false;
+                            cache[key].count = 0;
+
+                        }
+
+                    }
+
+                }
+
+                this.render = function (scene, camera) {
+
+                    let renderTarget;
+                    let forceClear = false;
+
+                    if (arguments[2] !== undefined) {
+
+                        console.warn('THREE.OutlineEffect.render(): the renderTarget argument has been removed. Use .setRenderTarget() instead.');
+                        renderTarget = arguments[2];
+
+                    }
+
+                    if (arguments[3] !== undefined) {
+
+                        console.warn('THREE.OutlineEffect.render(): the forceClear argument has been removed. Use .clear() instead.');
+                        forceClear = arguments[3];
+
+                    }
+
+                    if (renderTarget !== undefined) renderer.setRenderTarget(renderTarget);
+
+                    if (forceClear) renderer.clear();
+
+                    if (this.enabled === false) {
+
+                        renderer.render(scene, camera);
+                        return;
+
+                    }
+
+                    const currentAutoClear = renderer.autoClear;
+                    renderer.autoClear = this.autoClear;
+
+                    renderer.render(scene, camera);
+
+                    renderer.autoClear = currentAutoClear;
+
+                    this.renderOutline(scene, camera);
+
+                };
+
+                this.renderOutline = function (scene, camera) {
+
+                    const currentAutoClear = renderer.autoClear;
+                    const currentSceneAutoUpdate = scene.autoUpdate;
+                    const currentSceneBackground = scene.background;
+                    const currentShadowMapEnabled = renderer.shadowMap.enabled;
+
+                    scene.autoUpdate = false;
+                    scene.background = null;
+                    renderer.autoClear = false;
+                    renderer.shadowMap.enabled = false;
+
+                    scene.traverse(setOutlineMaterial);
+
+                    renderer.render(scene, camera);
+
+                    scene.traverse(restoreOriginalMaterial);
+
+                    cleanupCache();
+
+                    scene.autoUpdate = currentSceneAutoUpdate;
+                    scene.background = currentSceneBackground;
+                    renderer.autoClear = currentAutoClear;
+                    renderer.shadowMap.enabled = currentShadowMapEnabled;
+
+                };
+
+                /*
+                 * See #9918
+                 *
+                 * The following property copies and wrapper methods enable
+                 * OutlineEffect to be called from other *Effect, like
+                 *
+                 * effect = new StereoEffect( new OutlineEffect( renderer ) );
+                 *
+                 * function render () {
+                 *
+                  * 	effect.render( scene, camera );
+                 *
+                 * }
+                 */
+                this.autoClear = renderer.autoClear;
+                this.domElement = renderer.domElement;
+                this.shadowMap = renderer.shadowMap;
+
+                this.clear = function (color, depth, stencil) {
+
+                    renderer.clear(color, depth, stencil);
+
+                };
+
+                this.getPixelRatio = function () {
+
+                    return renderer.getPixelRatio();
+
+                };
+
+                this.setPixelRatio = function (value) {
+
+                    renderer.setPixelRatio(value);
+
+                };
+
+                this.getSize = function (target) {
+
+                    return renderer.getSize(target);
+
+                };
+
+                this.setSize = function (width, height, updateStyle) {
+
+                    renderer.setSize(width, height, updateStyle);
+
+                };
+
+                this.setViewport = function (x, y, width, height) {
+
+                    renderer.setViewport(x, y, width, height);
+
+                };
+
+                this.setScissor = function (x, y, width, height) {
+
+                    renderer.setScissor(x, y, width, height);
+
+                };
+
+                this.setScissorTest = function (boolean) {
+
+                    renderer.setScissorTest(boolean);
+
+                };
+
+                this.setRenderTarget = function (renderTarget) {
+
+                    renderer.setRenderTarget(renderTarget);
+
+                };
+
+            }
+
+        }
+
+        const POSITION_MULITPLIER = 30;
+        const DISTANCE_FROM_CAMERA = 20;
+
+        const FACE_COLOR = "salmon";
+        const PARTICLE_COLOR = "gold"
+
+        let renderer, camera, scene, mousePosition, effect;
+
+        let initialPosition = new THREE.Vector3();
 
         let primitives = [];
+        let particles = [];
 
         // Window callbacks
         function onWindowResize() {
@@ -20,6 +564,7 @@
             camera.updateProjectionMatrix();
 
             renderer.setSize(window.innerWidth, window.innerHeight);
+            effect.setSize(window.innerWidth, window.innerHeight);
         }
         function onMouseMove() {
             mousePosition.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -29,9 +574,6 @@
 
         // 3js-specific handlers
         function init() {
-            window.addEventListener("resize", onWindowResize, false);
-            document.addEventListener("mousemove", onMouseMove, false)
-
             renderer = new THREE.WebGLRenderer();
             renderer.setSize(window.innerWidth, window.innerHeight);
 
@@ -42,19 +584,39 @@
             scene = new THREE.Scene();
 
             mousePosition = new THREE.Vector3()
+
+            effect = new OutlineEffect(renderer);
+
+            window.addEventListener("resize", onWindowResize, false);
+            document.addEventListener("mousemove", onMouseMove, false);
+            document.getElementById("main-body").appendChild(renderer.domElement);
+
+            scene.add(new THREE.AmbientLight(0xffffff, 0.5));
+            let pointLight = new THREE.PointLight(0xffffff, 1, 0);
+            pointLight.position.set(0, 0, 0);
+            scene.add(pointLight);
         }
         function animate() {
             requestAnimationFrame(animate);
 
             primitives.forEach(p => {
                 p.lookAt(mousePosition);
+                p.position.set(
+                    initialPosition.x - (mousePosition.x * POSITION_MULITPLIER),
+                    initialPosition.y - (mousePosition.y * POSITION_MULITPLIER),
+                    initialPosition.z
+                );
             });
+            particles.forEach(p => {
+                p.rotateX(-0.0005);
+            })
 
             renderer.render(scene, camera);
+            effect.render(scene, camera);
         }
 
         // Primitive creation
-        function createLine(points, color, opacity, primitivesArray, threeScene) {
+        function createLine(points, color, opacity, threeScene) {
             let material = new THREE.LineBasicMaterial({ color: color, opacity: opacity });
 
             let pointsArray = [];
@@ -64,40 +626,114 @@
 
             let line = new THREE.Line(geometry, material);
 
-            primitivesArray.push(line);
-
             threeScene.add(line);
+
+            return line;
         }
-        function createBox(x, y, z, color, opacity, primitivesArray, threeScene) {
-            let material = new THREE.MeshBasicMaterial({ color: color, opacity: opacity, wireframe: true });
+
+        function createBox(x, y, z, color, opacity, threeScene) {
+            let material = createToonMaterial(color, opacity);
 
             let geometry = new THREE.BoxGeometry(x, y, z);
 
             let box = new THREE.Mesh(geometry, material);
 
-            primitivesArray.push(box);
-
             threeScene.add(box);
+
+            return box;
+        }
+
+        function createSphere(r, w, h, color, opacity, threeScene) {
+            let material = createToonMaterial(color, opacity);
+
+            let geometry = new THREE.SphereGeometry(r, w, h);
+
+            let sphere = new THREE.Mesh(geometry, material);
+
+            threeScene.add(sphere);
+
+            return sphere;
+        }
+
+        function createToonMaterial(color, opacity) {
+            const colors = new Uint8Array(8);
+            for (let c = 0; c <= colors.length; c++) {
+                colors[c] = (c / colors.length) * 256;
+            }
+
+            const gradientMap = new THREE.DataTexture(colors, colors.length, 1, THREE.LuminanceFormat);
+            gradientMap.minFilter = THREE.NearestFilter;
+            gradientMap.magFilter = THREE.NearestFilter;
+            gradientMap.generateMipmaps = false;
+
+            return new THREE.MeshToonMaterial({ color: color, opacity: opacity, gradientMap: gradientMap, depthTest: true, depthWrite: true });
+        }
+        // Wrapper function
+        function createMainShape() {
+            // Create an empty shape to serve as the root object
+            let faceCenter = createBox(0, 0, 0, FACE_COLOR, 0.0, scene);
+            faceCenter.position.set(0, 0, -DISTANCE_FROM_CAMERA);
+            primitives.push(faceCenter);
+
+            let mouth = createBox(10, 2, 1, FACE_COLOR, 1.0, scene);
+            mouth.position.set(0, -10, -20);
+
+            let leftEye = createSphere(5, 8, 8, FACE_COLOR, 1.0, scene);
+            leftEye.position.set(-10, 0, -20);
+
+            let rightEye = createSphere(5, 8, 8, FACE_COLOR, 1.0, scene);
+            rightEye.position.set(10, 0, -20);
+
+            faceCenter.getWorldPosition(initialPosition);
+
+            faceCenter.add(mouth);
+            faceCenter.add(leftEye);
+            faceCenter.add(rightEye);
+        }
+
+        // Particles
+        function createParticleCloud(threeScene) {
+            let material = new THREE.PointsMaterial({
+                color: PARTICLE_COLOR,
+                opacity: 0.5,
+                size: 5
+            });
+
+            let geometry = new THREE.BufferGeometry();
+            let points = [];
+            for (let i = 0; i < 1000; i++) {
+                points.push(new THREE.Vector3(
+                    (Math.random() * 800) - 400,
+                    (Math.random() * 800) - 400,
+                    (Math.random() * 800) - 400
+                ));
+            }
+
+            geometry.setFromPoints(points);
+
+            let pointCloud = new THREE.Points(geometry, material);
+            threeScene.add(pointCloud);
+
+            return pointCloud;
+        }
+        function createMainBackground() {
+            let particleParent = createBox(0, 0, 0, PARTICLE_COLOR, 0.0, scene);
+            // Auto-rotate particle parent
+            particles.push(particleParent);
+
+            let particleCloud = createParticleCloud(scene);
+            particleCloud.position.set(0, 0, -DISTANCE_FROM_CAMERA);
+            // Rotate towards user mouse
+            primitives.push(particleCloud);
+
+            particleParent.add(particleCloud);
         }
 
         init();
 
-        createLine(
-            [
-                new THREE.Vector3(-10, 0, 0),
-                new THREE.Vector3(0, 10, 0),
-                new THREE.Vector3(10, 0, 0)
-            ],
-            "salmon",
-            0.5,
-            primitives,
-            scene
-        );
-        createBox(30, 30, 30, "salmon", 0.5, primitives, scene);
+        createMainShape();
 
-        // scene.add(firstLine);
-
-        document.getElementById("main-body").appendChild(renderer.domElement);
+        createMainBackground();
 
         animate();
     </script>
